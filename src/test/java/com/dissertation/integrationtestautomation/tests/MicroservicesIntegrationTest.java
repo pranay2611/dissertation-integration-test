@@ -23,6 +23,75 @@ public class MicroservicesIntegrationTest {
     public void setup() {
         RestAssured.baseURI = BASE_URL;
         RestAssured.enableLoggingOfRequestAndResponseIfValidationFails();
+        
+        // Wait for API Gateway to be fully ready before running tests
+        waitForGatewayReady();
+    }
+    
+    /**
+     * Wait for API Gateway to be ready and routes to be loaded
+     * This prevents 405 errors from route configuration not being fully loaded
+     */
+    private void waitForGatewayReady() {
+        Reporter.log("Waiting for API Gateway to be ready...", true);
+        int maxAttempts = 30;
+        int attempt = 0;
+        boolean gatewayReady = false;
+        
+        while (attempt < maxAttempts && !gatewayReady) {
+            attempt++;
+            try {
+                // Check gateway health
+                Response healthResponse = RestAssured.given()
+                        .baseUri(BASE_URL)
+                        .when()
+                        .get("/actuator/health")
+                        .then()
+                        .extract()
+                        .response();
+                
+                if (healthResponse.getStatusCode() == 200) {
+                    // Verify POST route for /api/orders is loaded
+                    Response routesResponse = RestAssured.given()
+                            .baseUri(BASE_URL)
+                            .when()
+                            .get("/actuator/gateway/routes")
+                            .then()
+                            .extract()
+                            .response();
+                    
+                    if (routesResponse.getStatusCode() == 200) {
+                        String routesBody = routesResponse.getBody().asString();
+                        // Check if order-service-post route exists
+                        if (routesBody.contains("order-service-post") && 
+                            routesBody.contains("Methods: [POST]")) {
+                            gatewayReady = true;
+                            Reporter.log("API Gateway is ready! Routes loaded successfully.", true);
+                            break;
+                        }
+                    }
+                }
+                
+                if (!gatewayReady && attempt < maxAttempts) {
+                    Reporter.log("Gateway not ready yet (attempt " + attempt + "/" + maxAttempts + "), waiting 2 seconds...", true);
+                    Thread.sleep(2000);
+                }
+            } catch (Exception e) {
+                Reporter.log("Error checking gateway readiness (attempt " + attempt + "): " + e.getMessage(), true);
+                if (attempt < maxAttempts) {
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+        }
+        
+        if (!gatewayReady) {
+            Reporter.log("WARNING: API Gateway may not be fully ready. Tests may fail with 405 errors.", true);
+            Reporter.log("Gateway health check completed after " + attempt + " attempts.", true);
+        }
     }
 
     /**
