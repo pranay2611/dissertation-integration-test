@@ -223,7 +223,7 @@ public class MicroservicesIntegrationTest {
         
         return new Object[][]{
             // Test Case 1: Valid order with single item
-            // {"ord" + timestampSuffix + "u" + randomSuffix + "1", "Laptop", 1, 999.99, 201},
+            {"ord" + timestampSuffix + "u" + randomSuffix + "1", "Laptop", 1, 999.99, 201},
             
             // Test Case 2: Order with multiple quantities
             {"ord" + timestampSuffix + "u" + randomSuffix + "2", "Mouse", 5, 29.99, 201},
