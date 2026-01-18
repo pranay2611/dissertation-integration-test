@@ -67,6 +67,8 @@ public class MicroservicesIntegrationTest {
                             routesBody.contains("Methods: [POST]")) {
                             gatewayReady = true;
                             Reporter.log("API Gateway is ready! Routes loaded successfully.", true);
+                            // Add small delay to ensure routes are fully warmed up and cached
+                            Thread.sleep(1000);
                             break;
                         }
                     }
