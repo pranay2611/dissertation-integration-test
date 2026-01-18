@@ -65,11 +65,20 @@ public class MicroservicesIntegrationTest {
                         // Check if order-service-post route exists
                         if (routesBody.contains("order-service-post") && 
                             routesBody.contains("Methods: [POST]")) {
-                            gatewayReady = true;
-                            Reporter.log("API Gateway is ready! Routes loaded successfully.", true);
-                            // Add small delay to ensure routes are fully warmed up and cached
-                            Thread.sleep(1000);
-                            break;
+                            // Verify the route actually works by testing a POST request
+                            // This ensures routes are fully loaded and cached, not just registered
+                            Reporter.log("Route detected, verifying POST /api/orders route is functional...", true);
+                            boolean routeFunctional = verifyPostRouteFunctional();
+                            
+                            if (routeFunctional) {
+                                gatewayReady = true;
+                                Reporter.log("API Gateway is ready! Routes loaded and verified successfully.", true);
+                                // Add additional delay to ensure routes are fully warmed up
+                                Thread.sleep(2000);
+                                break;
+                            } else {
+                                Reporter.log("Route exists but not yet functional, waiting...", true);
+                            }
                         }
                     }
                 }
@@ -92,7 +101,40 @@ public class MicroservicesIntegrationTest {
         
         if (!gatewayReady) {
             Reporter.log("WARNING: API Gateway may not be fully ready. Tests may fail with 405 errors.", true);
-            Reporter.log("Gateway health check completed after " + attempt + " attempts.", true);
+        }
+    }
+    
+    /**
+     * Verify that POST /api/orders route is actually functional (not just registered)
+     * This helps catch cases where routes are registered but not yet fully loaded
+     */
+    private boolean verifyPostRouteFunctional() {
+        try {
+            // Make a test POST request to verify the route works
+            // Use a dummy request that will fail validation but should not return 405
+            Response testResponse = RestAssured.given()
+                    .baseUri(BASE_URL)
+                    .contentType("application/json")
+                    .body("{\"test\":\"data\"}")
+                    .when()
+                    .post("/api/orders")
+                    .then()
+                    .extract()
+                    .response();
+            
+            int statusCode = testResponse.getStatusCode();
+            // If we get 405, the route isn't functional yet
+            // If we get 400/401/500, the route is working (just validation/auth/processing failed)
+            if (statusCode == 405) {
+                Reporter.log("POST route verification: Got 405 - route not functional yet", true);
+                return false;
+            } else {
+                Reporter.log("POST route verification: Got " + statusCode + " - route is functional", true);
+                return true;
+            }
+        } catch (Exception e) {
+            Reporter.log("POST route verification failed with exception: " + e.getMessage(), true);
+            return false;
         }
     }
 
@@ -336,7 +378,30 @@ public class MicroservicesIntegrationTest {
         
         Assert.assertNotNull(token, "Token must not be null for order creation test");
         
-        Response response = ApiClient.createOrder(username, productName, quantity, unitPrice, token);
+        // Retry mechanism for 405 errors (especially important for first test after gateway startup)
+        Response response = null;
+        int maxRetries = 3;
+        int retryDelay = 1000; // Start with 1 second
+        
+        for (int retry = 0; retry < maxRetries; retry++) {
+            response = ApiClient.createOrder(username, productName, quantity, unitPrice, token);
+            int statusCode = response.getStatusCode();
+            
+            // If we get 405, retry after a delay (route might still be loading)
+            if (statusCode == 405 && retry < maxRetries - 1) {
+                Reporter.log("Got 405 error on attempt " + (retry + 1) + ", retrying after " + retryDelay + "ms...", true);
+                try {
+                    Thread.sleep(retryDelay);
+                    retryDelay *= 2; // Exponential backoff
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            } else {
+                // Success or non-405 error, break retry loop
+                break;
+            }
+        }
 
         Reporter.log("Response Status: " + response.getStatusCode() + ", Expected: " + expectedStatus, true);
         Reporter.log("Response Body: " + response.getBody().asString(), true);
