@@ -23,8 +23,14 @@ public class RestApiUtils {
         System.setProperty("httpclient.protocol.version", "HTTP/1.1");
     }
 
+    /** Max retries for POST when gateway returns 405 (Method Not Allowed) or 503 (Service Unavailable). */
+    private static final int POST_RETRY_MAX = 3;
+    /** Delay in ms between retries. */
+    private static final int POST_RETRY_DELAY_MS = 500;
+
     /**
-     * Perform a POST request with JSON body
+     * Perform a POST request with JSON body.
+     * Retries on 405 (Method Not Allowed) or 503 (Service Unavailable) to avoid transient gateway failures.
      *
      * @param endpoint the API endpoint
      * @param requestBody the request body as Map
@@ -36,49 +42,86 @@ public class RestApiUtils {
         // Key: curl doesn't send Origin, Referer, or other CORS-triggering headers
         // CRITICAL: Disable cookies to avoid CSRF token issues - curl doesn't send cookies
         // Cookies can trigger Spring Security CSRF checks even when CSRF is disabled
-        
-        System.out.println("===========================================");
-        System.out.println("RestAssured POST Request Details:");
-        System.out.println("Endpoint: " + endpoint);
-        System.out.println("Request Body: " + requestBody);
-        System.out.println("===========================================");
-        
-        try {
-            Response response = given()
-                    .log().all()  // Log all request details including headers
-                    // Disable cookies - curl doesn't send cookies, and cookies can trigger CSRF checks
-                    .cookies(new java.util.HashMap<>())  // Clear any cookies
-                    // Set only the headers curl sends
-                    .contentType(ContentType.JSON)
-                    .accept("*/*")  // Match curl's Accept: */*
-                    .header("User-Agent", "curl/8.4.0")  // Match curl's User-Agent
-                    .header("Connection", "close")  // Match curl's default connection behavior (no keep-alive)
-                    // Use RestAssured's redirect config to match curl behavior
-                    .redirects().follow(false)  // curl doesn't follow redirects by default
-                    .body(requestBody)
-                    .when()
-                    .post(endpoint)
-                    .then()
-                    .log().all()  // Log all response details including headers
-                    .extract()
-                    .response();
-            
-            if (response == null) {
-                System.err.println("ERROR: Response is null from postRequest for endpoint: " + endpoint);
-                throw new RuntimeException("Response is null from POST request to " + endpoint);
+
+        Response lastResponse = null;
+        int attempt = 0;
+
+        while (attempt < POST_RETRY_MAX) {
+            attempt++;
+            if (attempt > 1) {
+                System.out.println("postRequest - Retry attempt " + attempt + "/" + POST_RETRY_MAX + " for " + endpoint);
             }
-            
-            System.out.println("postRequest - Response Status: " + response.getStatusCode() + 
-                    ", Body: " + (response.getBody() != null ? response.getBody().asString() : "null"));
-            
-            return response;
-        } catch (Exception e) {
-            System.err.println("ERROR: Exception in postRequest for endpoint: " + endpoint);
-            System.err.println("Exception type: " + e.getClass().getName());
-            System.err.println("Exception message: " + e.getMessage());
-            e.printStackTrace();
-            throw new RuntimeException("Failed to execute POST request to " + endpoint + ": " + e.getMessage(), e);
+            System.out.println("===========================================");
+            System.out.println("RestAssured POST Request Details:");
+            System.out.println("Endpoint: " + endpoint);
+            System.out.println("Request Body: " + requestBody);
+            System.out.println("===========================================");
+
+            try {
+                Response response = doPostRequest(endpoint, requestBody);
+
+                if (response == null) {
+                    System.err.println("ERROR: Response is null from postRequest for endpoint: " + endpoint);
+                    throw new RuntimeException("Response is null from POST request to " + endpoint);
+                }
+
+                int status = response.getStatusCode();
+                System.out.println("postRequest - Response Status: " + status +
+                        ", Body: " + (response.getBody() != null ? response.getBody().asString() : "null"));
+
+                // Retry on transient 405 or 503 (gateway route/circuit breaker issues under load)
+                if ((status == 405 || status == 503) && attempt < POST_RETRY_MAX) {
+                    System.out.println("postRequest - Transient " + status + ", retrying in " + POST_RETRY_DELAY_MS + "ms...");
+                    try {
+                        Thread.sleep(POST_RETRY_DELAY_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return response;
+                    }
+                    lastResponse = response;
+                    continue;
+                }
+
+                return response;
+            } catch (Exception e) {
+                if (attempt >= POST_RETRY_MAX) {
+                    System.err.println("ERROR: Exception in postRequest for endpoint: " + endpoint);
+                    System.err.println("Exception type: " + e.getClass().getName());
+                    System.err.println("Exception message: " + e.getMessage());
+                    e.printStackTrace();
+                    throw new RuntimeException("Failed to execute POST request to " + endpoint + ": " + e.getMessage(), e);
+                }
+                try {
+                    Thread.sleep(POST_RETRY_DELAY_MS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Failed to execute POST request to " + endpoint + ": " + e.getMessage(), e);
+                }
+            }
         }
+
+        return lastResponse != null ? lastResponse : doPostRequest(endpoint, requestBody);
+    }
+
+    /**
+     * Single POST attempt (no retry). Used by postRequest and postRequestWithAuth.
+     */
+    private static Response doPostRequest(String endpoint, Map<String, Object> requestBody) {
+        return given()
+                .log().all()
+                .cookies(new java.util.HashMap<>())
+                .contentType(ContentType.JSON)
+                .accept("*/*")
+                .header("User-Agent", "curl/8.4.0")
+                .header("Connection", "close")
+                .redirects().follow(false)
+                .body(requestBody)
+                .when()
+                .post(endpoint)
+                .then()
+                .log().all()
+                .extract()
+                .response();
     }
 
     /**
